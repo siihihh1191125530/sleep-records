@@ -1,0 +1,6 @@
+import cn.local.psqirecord.*;import java.util.*;
+public class ScaleTest {
+ static int count;static void check(boolean value,String message){count++;if(!value)throw new AssertionError(message);}
+ public static void main(String[]args){for(String id:Scales.IDS){if(id.equals("PSQI"))continue;Scales.Def d=Scales.get(id);Map<String,String>a=Scales.empty(id);a.put("patient","001");a.put("assessmentTime","12:30");a.put("rater","R1");check(!Scales.errors(id,a).isEmpty(),id+" missing");for(Scales.Item i:d.items)a.put(i.key,"0");check(Form.total(Scales.score(id,a))==0,id+" zero");for(Scales.Item i:d.items)a.put(i.key,""+i.max());check(Form.total(Scales.score(id,a))==d.max,id+" maximum");for(Scales.Item i:d.items){String old=a.put(i.key,""+(i.max()+1));check(!Scales.errors(id,a).isEmpty(),id+" bound "+i.key);a.put(i.key,old);}a.put("assessmentTime","24:00");check(!Scales.errors(id,a).isEmpty(),"invalid time");a.put("assessmentTime","12:30");if(d.clinician){a.put("rater","");check(!Scales.errors(id,a).isEmpty(),"rater required");}}
+  check(Scales.get("HAMD17").items[15].max()==2,"weight not-assessed3 excluded");check(Scales.get("HAMD17").items.length==17,"17 items only");System.out.println("PASS: "+count+" scale assertions");}
+}

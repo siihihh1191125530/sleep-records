@@ -1,0 +1,1 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="cn.local.psqirecord.tests"><uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34"/><application android:label="PSQI tests"/><instrumentation android:name="cn.local.psqirecord.tests.DeviceTests" android:targetPackage="cn.local.psqirecord" android:label="PSQI device verification"/></manifest>

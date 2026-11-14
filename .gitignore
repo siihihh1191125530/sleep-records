@@ -1,0 +1,27 @@
+# Local build, toolchain and signing materials
+/build/
+/private/
+/android-sdk/
+/r8-*.jar
+*.p12
+*.jks
+*.keystore
+*password*.txt
+.env
+.env.*
+local.properties
+# Patient data and exports: never commit
+*.db
+*.db-*
+*.sqlite*
+*.psqibak
+*.xlsx
+*.csv
+*.apk
+*.zip
+# Editor files
+.idea/
+.vscode/
+*.iml
+Thumbs.db
+.DS_Store
