@@ -12,7 +12,7 @@ public final class Store extends SQLiteOpenHelper {
  private SQLiteDatabase dbWrite(){return upgradeDb==null?getWritableDatabase():upgradeDb;}
  public static final class Row {public String id,data;public long created,updated;public boolean deleted;}
  public Store(Context c){this(c,"psqi-records.db");}
- public Store(Context c,String name){super(c,name,null,4);}
+ public Store(Context c,String name){super(c,name,null,5);}
  @Override public void onConfigure(SQLiteDatabase db){db.setForeignKeyConstraintsEnabled(true);db.execSQL("PRAGMA synchronous=FULL");}
  @Override public void onCreate(SQLiteDatabase db){
   db.execSQL("CREATE TABLE records(id TEXT PRIMARY KEY, data TEXT NOT NULL, created INTEGER NOT NULL, updated INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0)");
@@ -20,8 +20,9 @@ public final class Store extends SQLiteOpenHelper {
   db.execSQL("CREATE INDEX rev_record ON revisions(record_id,seq)");
   db.execSQL("CREATE TABLE imports(fingerprint TEXT PRIMARY KEY)");
   patientSchema(db);
+  planSchema(db);
  }
- @Override public void onUpgrade(SQLiteDatabase d,int old,int next){if(old>=1&&old<4&&next==4){upgradeDb=d;try{if(old==1){patientSchema(d);backfill(d);}else{if(old==2)d.execSQL("ALTER TABLE record_meta ADD COLUMN scale TEXT NOT NULL DEFAULT 'PSQI'");boolean hasDeleted=false;try(Cursor c=d.rawQuery("PRAGMA table_info(patients)",null)){while(c.moveToNext())if(c.getString(1).equals("deleted"))hasDeleted=true;}if(!hasDeleted)d.execSQL("ALTER TABLE patients ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0");}d.execSQL("CREATE INDEX IF NOT EXISTS patient_scale_days ON record_meta(patient_id,day,scale)");}catch(Exception e){throw new IllegalStateException("数据升级未完成，原数据将保留",e);}finally{upgradeDb=null;}}else throw new IllegalStateException("不支持此数据库升级路径，请保留原安装");}
+ @Override public void onUpgrade(SQLiteDatabase d,int old,int next){if(old>=1&&old<5&&next==5){upgradeDb=d;try{if(old==1){patientSchema(d);backfill(d);}else{if(old==2)d.execSQL("ALTER TABLE record_meta ADD COLUMN scale TEXT NOT NULL DEFAULT 'PSQI'");boolean hasDeleted=false;try(Cursor c=d.rawQuery("PRAGMA table_info(patients)",null)){while(c.moveToNext())if(c.getString(1).equals("deleted"))hasDeleted=true;}if(!hasDeleted)d.execSQL("ALTER TABLE patients ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0");}planSchema(d);d.execSQL("CREATE INDEX IF NOT EXISTS patient_scale_days ON record_meta(patient_id,day,scale)");}catch(Exception e){throw new IllegalStateException("数据升级未完成，原数据将保留",e);}finally{upgradeDb=null;}}else throw new IllegalStateException("不支持此数据库升级路径，请保留原安装");}
  public static String scaleOf(String data)throws Exception{return new JSONObject(data).optString("scale","PSQI");}
  public static JSONObject payload(Map<String,String>a,boolean completed)throws Exception{return payload(a,completed,"PSQI");}
  public static JSONObject payload(Map<String,String>a,boolean completed,String scale)throws Exception{
@@ -40,13 +41,13 @@ public final class Store extends SQLiteOpenHelper {
  public long revisionCount(){try(Cursor c=dbRead().rawQuery("SELECT COALESCE(SUM(seq),0) FROM sqlite_sequence WHERE name IN ('revisions','patient_events','meta_events')",null)){c.moveToFirst();return c.getLong(0);}}
  public JSONArray history(String id)throws Exception{JSONArray a=new JSONArray();try(Cursor c=dbRead().rawQuery("SELECT data,reason,created FROM revisions WHERE record_id=? ORDER BY seq DESC LIMIT 50",new String[]{id})){while(c.moveToNext()){JSONObject j=new JSONObject();j.put("data",new JSONObject(c.getString(0)));j.put("reason",c.getString(1));j.put("created",c.getLong(2));a.put(j);}}return a;}
  public JSONObject backup()throws Exception{
-  SQLiteDatabase db=dbRead();db.beginTransaction();try{backfill(db);JSONObject out=new JSONObject();out.put("format","psqi-backup");out.put("version",4);out.put("appVersion","0.0.1");out.put("patients",patientBackup());out.put("rule",Form.RULE);out.put("exportedAt",System.currentTimeMillis());out.put("revision",revisionCount());JSONArray records=new JSONArray();
+  SQLiteDatabase db=dbRead();db.beginTransaction();try{backfill(db);JSONObject out=new JSONObject();out.put("format","psqi-backup");out.put("version",4);out.put("appVersion","0.0.3");out.put("patients",patientBackup());out.put("rule",Form.RULE);out.put("exportedAt",System.currentTimeMillis());out.put("revision",revisionCount());JSONArray records=new JSONArray();
    try(Cursor c=db.rawQuery("SELECT id,data,created,updated,deleted FROM records ORDER BY created",null)){while(c.moveToNext()){Row r=row(c);JSONObject j=new JSONObject();j.put("id",r.id);j.put("data",new JSONObject(r.data));j.put("created",r.created);j.put("updated",r.updated);j.put("deleted",r.deleted);RecordMeta m=meta(r.id);j.put("patientId",m.patientId);j.put("day",m.day);j.put("scale",m.scale);j.put("dateHistory",metaBackup(r.id));JSONArray history=new JSONArray();try(Cursor h=db.rawQuery("SELECT data,reason,created FROM revisions WHERE record_id=? ORDER BY seq",new String[]{r.id})){while(h.moveToNext()){JSONObject v=new JSONObject();v.put("data",new JSONObject(h.getString(0)));v.put("reason",h.getString(1));v.put("created",h.getLong(2));history.put(v);}}j.put("history",history);records.put(j);}}
    out.put("records",records);db.setTransactionSuccessful();return out;
   }finally{db.endTransaction();}
  }
  public static void validatePayload(String data)throws Exception{
-  if(data.length()>100000)throw new IllegalArgumentException("单份记录过大");JSONObject j=new JSONObject(data);String scale=scaleOf(data);Scales.Def d=Scales.get(scale);if(!d.rule.equals(j.getString("rule")))throw new IllegalArgumentException("不支持这个计分规则版本");JSONObject values=j.getJSONObject("answers");Set<String>allowed=new HashSet<>(Scales.keys(scale));Iterator<String>it=values.keys();while(it.hasNext())if(!allowed.contains(it.next()))throw new IllegalArgumentException("备份包含未知字段");for(String k:allowed){Object value=values.get(k);if(!(value instanceof String)||((String)value).length()>4000)throw new IllegalArgumentException("备份答案格式有误");}Object done=j.get("completed");if(!(done instanceof Boolean))throw new IllegalArgumentException("完成标记无效");if((Boolean)done){int[]scores=Scales.score(scale,answers(data));JSONArray saved=j.getJSONArray("scores");if(saved.length()!=scores.length||j.getInt("total")!=Form.total(scores))throw new IllegalArgumentException("备份分数与答案不一致");for(int n=0;n<scores.length;n++)if(saved.getInt(n)!=scores[n])throw new IllegalArgumentException("备份分数与答案不一致");}
+  if(data.length()>100000)throw new IllegalArgumentException("单份记录过大");JSONObject j=new JSONObject(data);String scale=scaleOf(data);Scales.Def d=Scales.get(scale);if(!d.rule.equals(j.getString("rule")))throw new IllegalArgumentException("不支持这个计分规则版本");JSONObject values=j.getJSONObject("answers");Set<String>allowed=new HashSet<>(Scales.keys(scale));Iterator<String>it=values.keys();while(it.hasNext())if(!allowed.contains(it.next()))throw new IllegalArgumentException("备份包含未知字段");for(String k:allowed){Object value=scale.equals("PSQI")&&Scales.PSQI_EXTRA.contains(k)&&!values.has(k)?"":values.get(k);if(!(value instanceof String)||((String)value).length()>4000)throw new IllegalArgumentException("备份答案格式有误");}Object done=j.get("completed");if(!(done instanceof Boolean))throw new IllegalArgumentException("完成标记无效");if((Boolean)done){int[]scores=Scales.score(scale,answers(data));JSONArray saved=j.getJSONArray("scores");if(saved.length()!=scores.length||j.getInt("total")!=Form.total(scores))throw new IllegalArgumentException("备份分数与答案不一致");for(int n=0;n<scores.length;n++)if(saved.getInt(n)!=scores[n])throw new IllegalArgumentException("备份分数与答案不一致");}
  }
  public static void validateBackup(JSONObject root)throws Exception{
   if(!"psqi-backup".equals(root.getString("format"))||(root.getInt("version")<1||root.getInt("version")>4))throw new IllegalArgumentException("备份版本不受支持");validatePatients(root);JSONArray a=root.getJSONArray("records");if(a.length()>50000)throw new IllegalArgumentException("记录数过大");Set<String>ids=new HashSet<>();int count=0;
@@ -107,14 +108,102 @@ public final class Store extends SQLiteOpenHelper {
    String id=UUID.randomUUID().toString();long now=System.currentTimeMillis();Map<String,String>a=Scales.empty(scale);a.put("patient",p.code);if(!scale.equals("PSQI"))a.put("assessmentTime",new java.text.SimpleDateFormat("HH:mm",Locale.US).format(new Date()));String data=payload(a,false,scale).toString();ContentValues v=new ContentValues();v.put("id",id);v.put("data",data);v.put("created",now);v.put("updated",now);v.put("deleted",0);d.insertOrThrow("records",null,v);revision(d,id,data,"新建 "+date+" 记录",now);linkRecord(d,id,pid,date,"新建日期记录");d.setTransactionSuccessful();return id;
   }finally{d.endTransaction();}}
  public void setDate(String id,String date)throws Exception{checkDay(date);SQLiteDatabase d=dbWrite();d.beginTransaction();try{requireActiveRecord(id);RecordMeta m=meta(id);if(m==null)throw new IllegalArgumentException("记录缺少档案关联");if(!date.equals(m.day)){try(Cursor c=d.rawQuery("SELECT r.id FROM records r JOIN record_meta m ON m.record_id=r.id WHERE m.patient_id=? AND m.day=? AND m.scale=? AND r.id<>?",new String[]{m.patientId,date,m.scale,id})){if(c.moveToFirst())throw new IllegalArgumentException("这个日期已有记录（含回收站），不能覆盖");}linkRecord(d,id,m.patientId,date,"记录日期从 "+m.day+" 调整到 "+date);ContentValues v=new ContentValues();v.put("updated",System.currentTimeMillis());d.update("records",v,"id=?",new String[]{id});revision(d,id,get(id).data,"日期调整 "+m.day+" → "+date,System.currentTimeMillis());}d.setTransactionSuccessful();}finally{d.endTransaction();}}
- private JSONArray patientBackup()throws Exception{JSONArray out=new JSONArray();List<Patient>all=patients(false);all.addAll(patients(true));for(Patient p:all){JSONObject j=new JSONObject();j.put("id",p.id);j.put("code",p.code);j.put("name",p.name);j.put("created",p.created);j.put("updated",p.updated);j.put("deleted",p.deleted);JSONArray h=new JSONArray();try(Cursor c=dbRead().rawQuery("SELECT data,reason,created FROM patient_events WHERE patient_id=? ORDER BY seq",new String[]{p.id})){while(c.moveToNext()){JSONObject e=new JSONObject();e.put("data",new JSONObject(c.getString(0)));e.put("reason",c.getString(1));e.put("created",c.getLong(2));h.put(e);}}j.put("history",h);out.put(j);}return out;}
+ private static void planSchema(SQLiteDatabase db) {
+  db.execSQL("CREATE TABLE IF NOT EXISTS scale_plans(patient_id TEXT NOT NULL REFERENCES patients(id) ON DELETE CASCADE,day TEXT NOT NULL,scales TEXT NOT NULL,PRIMARY KEY(patient_id,day))");
+ }
+ private Set<String> readPlan(SQLiteDatabase db,String pid,String day) throws Exception {
+  try(Cursor c=db.rawQuery("SELECT scales FROM scale_plans WHERE patient_id=? AND day=?",new String[]{pid,day})) {
+   return c.moveToFirst()?decodePlan(new JSONArray(c.getString(0))):null;
+  }
+ }
+ private static Set<String> decodePlan(JSONArray list) throws Exception {
+  Set<String> result=new LinkedHashSet<>();
+  for(int i=0;i<list.length();i++) {
+   String id=list.getString(i);
+   Scales.get(id);
+   if(!result.add(id))throw new IllegalArgumentException("量表设置重复");
+  }
+  return result;
+ }
+ private void writePlan(SQLiteDatabase db,String pid,String day,Set<String> selected) {
+  ContentValues values=new ContentValues();
+  values.put("patient_id",pid);
+  values.put("day",day);
+  values.put("scales",new JSONArray(selected).toString());
+  db.replaceOrThrow("scale_plans",null,values);
+ }
+ public Map<String,List<Row>> dayRecords(String pid,String day,boolean deleted) {
+  Map<String,List<Row>> result=new LinkedHashMap<>();
+  try(Cursor c=dbRead().rawQuery("SELECT r.id,r.data,r.created,r.updated,r.deleted,m.scale FROM record_meta m JOIN records r ON r.id=m.record_id WHERE m.patient_id=? AND m.day=? AND r.deleted=? ORDER BY r.updated DESC,r.id DESC",new String[]{pid,day,deleted?"1":"0"})){
+   while(c.moveToNext())result.computeIfAbsent(c.getString(5),ignored->new ArrayList<>()).add(row(c));
+  }
+  return result;
+ }
+ public Set<String> dayPlan(String pid,String day) throws Exception {
+  checkDay(day);
+  SQLiteDatabase db=dbWrite();
+  db.beginTransaction();
+  try {
+   Patient p=patient(pid);
+   if(p==null||p.deleted)throw new IllegalStateException("请先恢复病人档案");
+   Set<String> selected=readPlan(db,pid,day);
+   if(selected==null){
+    selected=readPlan(db,pid,"");
+    if(selected==null)selected=new LinkedHashSet<>(Arrays.asList(Scales.IDS));
+    selected.addAll(dayRecords(pid,day,false).keySet());
+    writePlan(db,pid,day,selected);
+    patientEvent(db,pid,patientData(p).toString(),"保存当日量表列表 "+day,System.currentTimeMillis());
+   }else selected.addAll(dayRecords(pid,day,false).keySet());
+   db.setTransactionSuccessful();
+   return selected;
+  }finally{db.endTransaction();}
+ }
+ public void changeDayPlan(String pid,String day,String scale,boolean add) throws Exception {
+  Scales.get(scale);
+  SQLiteDatabase db=dbWrite();
+  db.beginTransaction();
+  try {
+   Set<String> selected=dayPlan(pid,day);
+   if(add)selected.add(scale);
+   else {
+    selected.remove(scale);
+    for(Row r:dayRecords(pid,day,false).getOrDefault(scale,Collections.emptyList()))trash(r.id,true);
+   }
+   writePlan(db,pid,day,selected);
+   writePlan(db,pid,"",selected);
+   patientEvent(db,pid,patientData(patient(pid)).toString(),(add?"添加量表 ":"移除量表 ")+day+" "+scale,System.currentTimeMillis());
+   db.setTransactionSuccessful();
+  }finally{db.endTransaction();}
+ }
+ private JSONObject backupPlans(String pid) throws Exception {
+  JSONObject result=new JSONObject();
+  try(Cursor c=dbRead().rawQuery("SELECT day,scales FROM scale_plans WHERE patient_id=? ORDER BY day",new String[]{pid})){
+   while(c.moveToNext())result.put(c.getString(0),new JSONArray(c.getString(1)));
+  }
+  return result;
+ }
+ private static void validatePlans(JSONObject plans) throws Exception {
+  for(Iterator<String> keys=plans.keys();keys.hasNext();){
+   String day=keys.next();
+   if(!day.isEmpty())checkDay(day);
+   decodePlan(plans.getJSONArray(day));
+  }
+ }
+ private void restorePlans(SQLiteDatabase db,String pid,JSONObject plans) throws Exception {
+  for(Iterator<String> keys=plans.keys();keys.hasNext();){
+   String day=keys.next();
+   if(readPlan(db,pid,day)==null)writePlan(db,pid,day,decodePlan(plans.getJSONArray(day)));
+  }
+ }
+
+ private JSONArray patientBackup()throws Exception{JSONArray out=new JSONArray();List<Patient>all=patients(false);all.addAll(patients(true));for(Patient p:all){JSONObject j=new JSONObject();j.put("id",p.id);j.put("code",p.code);j.put("name",p.name);j.put("created",p.created);j.put("updated",p.updated);j.put("deleted",p.deleted);JSONArray h=new JSONArray();try(Cursor c=dbRead().rawQuery("SELECT data,reason,created FROM patient_events WHERE patient_id=? ORDER BY seq",new String[]{p.id})){while(c.moveToNext()){JSONObject e=new JSONObject();e.put("data",new JSONObject(c.getString(0)));e.put("reason",c.getString(1));e.put("created",c.getLong(2));h.put(e);}}j.put("history",h);j.put("scalePlans",backupPlans(p.id));out.put(j);}return out;}
  private JSONArray metaBackup(String id)throws Exception{JSONArray out=new JSONArray();try(Cursor c=dbRead().rawQuery("SELECT patient_id,day,reason,created FROM meta_events WHERE record_id=? ORDER BY seq",new String[]{id})){while(c.moveToNext()){JSONObject j=new JSONObject();j.put("patientId",c.getString(0));j.put("day",c.getString(1));j.put("reason",c.getString(2));j.put("created",c.getLong(3));out.put(j);}}return out;}
- private static void validatePatients(JSONObject root)throws Exception{if(root.getInt("version")==1)return;JSONArray people=root.getJSONArray("patients");if(people.length()>50000)throw new IllegalArgumentException("档案数过多");Set<String>ids=new HashSet<>(),codes=new HashSet<>();for(int n=0;n<people.length();n++){JSONObject p=people.getJSONObject(n);String id=p.getString("id"),code=p.getString("code");if(root.getInt("version")>=4&&!(p.get("deleted") instanceof Boolean))throw new IllegalArgumentException("病人回收站标记无效");UUID.fromString(id);if(!ids.add(id)||!codes.add(code)||code.trim().isEmpty()||code.length()>100||p.getString("name").length()>100||p.getLong("created")<=0||p.getLong("updated")<p.getLong("created"))throw new IllegalArgumentException("病人档案格式有误");JSONArray h=p.getJSONArray("history");for(int k=0;k<h.length();k++){JSONObject e=h.getJSONObject(k);if(e.getJSONObject("data").getString("code").length()>100||e.getJSONObject("data").getString("name").length()>100||e.getString("reason").length()>200||e.getLong("created")<=0)throw new IllegalArgumentException("档案历史有误");}}
+ private static void validatePatients(JSONObject root)throws Exception{if(root.getInt("version")==1)return;JSONArray people=root.getJSONArray("patients");if(people.length()>50000)throw new IllegalArgumentException("档案数过多");Set<String>ids=new HashSet<>(),codes=new HashSet<>();for(int n=0;n<people.length();n++){JSONObject p=people.getJSONObject(n);if(p.has("scalePlans"))validatePlans(p.getJSONObject("scalePlans"));String id=p.getString("id"),code=p.getString("code");if(root.getInt("version")>=4&&!(p.get("deleted") instanceof Boolean))throw new IllegalArgumentException("病人回收站标记无效");UUID.fromString(id);if(!ids.add(id)||!codes.add(code)||code.trim().isEmpty()||code.length()>100||p.getString("name").length()>100||p.getLong("created")<=0||p.getLong("updated")<p.getLong("created"))throw new IllegalArgumentException("病人档案格式有误");JSONArray h=p.getJSONArray("history");for(int k=0;k<h.length();k++){JSONObject e=h.getJSONObject(k);if(e.getJSONObject("data").getString("code").length()>100||e.getJSONObject("data").getString("name").length()>100||e.getString("reason").length()>200||e.getLong("created")<=0)throw new IllegalArgumentException("档案历史有误");}}
   JSONArray records=root.getJSONArray("records");for(int n=0;n<records.length();n++){JSONObject r=records.getJSONObject(n);if(!ids.contains(r.getString("patientId")))throw new IllegalArgumentException("记录关联的病人档案不存在");checkDay(r.getString("day"));JSONArray h=r.getJSONArray("dateHistory");for(int k=0;k<h.length();k++){JSONObject e=h.getJSONObject(k);if(!ids.contains(e.getString("patientId"))||e.getString("reason").length()>200||e.getLong("created")<=0)throw new IllegalArgumentException("日期历史格式有误");checkDay(e.getString("day"));}}
  }
  private boolean wasImported(SQLiteDatabase db,String fp){try(Cursor c=db.rawQuery("SELECT fingerprint FROM imports WHERE fingerprint=?",new String[]{fp})){return c.moveToFirst();}}
  private void markImported(SQLiteDatabase db,String fp){ContentValues v=new ContentValues();v.put("fingerprint",fp);db.insertWithOnConflict("imports",null,v,SQLiteDatabase.CONFLICT_IGNORE);}
- private Map<String,String> restorePatients(SQLiteDatabase d,JSONObject root)throws Exception{Map<String,String>map=new HashMap<>();if(root.getInt("version")==1)return map;JSONArray people=root.getJSONArray("patients");for(int n=0;n<people.length();n++){JSONObject p=people.getJSONObject(n);String source=p.getString("id"),code=p.getString("code"),fingerprint="P:"+BackupFile.hash(p.toString());Patient existing=patient(source);if(existing!=null&&!existing.code.equals(code))existing=null;if(existing==null)existing=patientByCode(code);String target=existing==null?(patient(source)==null?source:UUID.randomUUID().toString()):existing.id;map.put(source,target);if(existing!=null&&wasImported(d,fingerprint))continue;if(existing==null){insertPatient(d,target,code,p.getString("name"),p.getLong("created"),p.getLong("updated"));if(root.getInt("version")>=4){ContentValues state=new ContentValues();state.put("deleted",p.getBoolean("deleted")?1:0);d.update("patients",state,"id=?",new String[]{target});}}JSONArray h=p.getJSONArray("history");for(int k=0;k<h.length();k++){JSONObject e=h.getJSONObject(k);patientEvent(d,target,e.getJSONObject("data").toString(),e.getString("reason"),e.getLong("created"));}JSONObject incoming=new JSONObject();incoming.put("code",code);incoming.put("name",p.getString("name"));patientEvent(d,target,incoming.toString(),existing==null?"从备份恢复档案":"备份档案留档（保留当前称呼）",System.currentTimeMillis());markImported(d,fingerprint);}return map;}
+ private Map<String,String> restorePatients(SQLiteDatabase d,JSONObject root)throws Exception{Map<String,String>map=new HashMap<>();if(root.getInt("version")==1)return map;JSONArray people=root.getJSONArray("patients");for(int n=0;n<people.length();n++){JSONObject p=people.getJSONObject(n);String source=p.getString("id"),code=p.getString("code"),fingerprint="P:"+BackupFile.hash(p.toString());Patient existing=patient(source);if(existing!=null&&!existing.code.equals(code))existing=null;if(existing==null)existing=patientByCode(code);String target=existing==null?(patient(source)==null?source:UUID.randomUUID().toString()):existing.id;map.put(source,target);if(existing!=null&&wasImported(d,fingerprint))continue;if(existing==null){insertPatient(d,target,code,p.getString("name"),p.getLong("created"),p.getLong("updated"));if(root.getInt("version")>=4){ContentValues state=new ContentValues();state.put("deleted",p.getBoolean("deleted")?1:0);d.update("patients",state,"id=?",new String[]{target});}}if(p.has("scalePlans"))restorePlans(d,target,p.getJSONObject("scalePlans"));JSONArray h=p.getJSONArray("history");for(int k=0;k<h.length();k++){JSONObject e=h.getJSONObject(k);patientEvent(d,target,e.getJSONObject("data").toString(),e.getString("reason"),e.getLong("created"));}JSONObject incoming=new JSONObject();incoming.put("code",code);incoming.put("name",p.getString("name"));patientEvent(d,target,incoming.toString(),existing==null?"从备份恢复档案":"备份档案留档（保留当前称呼）",System.currentTimeMillis());markImported(d,fingerprint);}return map;}
 
  public String csv()throws Exception{return Reports.csv(backup(),new Reports.Filter(null,"",""));}
 }
